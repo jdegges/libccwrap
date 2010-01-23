@@ -1,0 +1,14 @@
+# libccwrap: compiler collection wrapper library
+
+This library provides a simple interface to a compiler binary installed on your
+system. Inspired by tinycc (http://bellard.org/tcc/), this library aims to
+allow users to compile and run C code from within their applications at runtime.
+
+Currently the library is only configured to compile code with `cc'. On most
+systems this should point to gcc.
+
+# Dependencies
+
+* libpthread:   Used to allow thread safe execution of all exposed functions.
+* libltdl:      A system independent dlopen wrapper. Used to dynamically link
+                with compiled modules.
