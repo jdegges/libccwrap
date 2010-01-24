@@ -21,6 +21,7 @@
  *****************************************************************************/
 
 #define _XOPEN_SOURCE
+#define _ISOC99_SOURCE
 
 #include <stdlib.h>
 #include <pthread.h>
