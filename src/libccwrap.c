@@ -20,16 +20,21 @@
  * THE SOFTWARE.
  *****************************************************************************/
 
+#define _XOPEN_SOURCE
+
 #include <stdlib.h>
 #include <pthread.h>
 #include <ltdl.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <unistd.h>
 #include "libccwrap.h"
 
 #define CCW_CC "cc"
 #define CCW_SET_ERRCODE(code){if (NULL != errcode) *errcode = code;}
+
+typedef void (*free_func_type)();
 
 typedef struct _ccw_list {
     void **ptr;
@@ -38,7 +43,7 @@ typedef struct _ccw_list {
     ccw_uint size;
     ccw_uint references;
     pthread_mutex_t mutex;
-    void (*free)();
+    free_func_type free;
 } _ccw_list;
 
 typedef struct _ccw_list * ccw_list;
@@ -57,7 +62,7 @@ typedef struct _ccw_context {
 /* creates a new generic list. registers a free function to be used to delete
  * each element when ccw_delete_list() is called
  */
-ccw_list ccw_new_list (void (*free_func)())
+ccw_list ccw_new_list (free_func_type free_func)
 {
     ccw_list list = calloc (1, sizeof(_ccw_list));
 
@@ -246,7 +251,7 @@ ccw_context ccw_new (void)
     if (NULL == (context->include_path_list = ccw_new_list (free))
         || NULL == (context->library_path_list = ccw_new_list (free))
         || NULL == (context->library_list = ccw_new_list (free))
-        || NULL == (context->dl_list = ccw_new_list ((void*)lt_dlclose)))
+        || NULL == (context->dl_list = ccw_new_list ((free_func_type)lt_dlclose)))
     {
         ccw_delete (context);
         return NULL;
@@ -475,7 +480,7 @@ void *ccw_get_symbol (ccw_context context,
 {
     ccw_list dl_list;
     ccw_uint i;
-    void (*func_ptr)();
+    void *func_ptr = NULL;
 
     if (NULL == context
         || NULL == (dl_list = context->dl_list))
