@@ -22,6 +22,7 @@
 
 #define _XOPEN_SOURCE
 #define _ISOC99_SOURCE
+#define _BSD_SOURCE
 
 #include <stdlib.h>
 #include <pthread.h>
@@ -30,6 +31,8 @@
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include "libccwrap.h"
 
 #define CCW_CC "cc"
@@ -57,7 +60,6 @@ typedef struct _ccw_context {
     ccw_list dl_list;
     ccw_uint references;
     pthread_mutex_t mutex;
-    ccw_uint seed;
 } _ccw_context;
 
 /* creates a new generic list. registers a free function to be used to delete
@@ -261,7 +263,6 @@ ccw_context ccw_new (void)
     pthread_mutex_init (&context->mutex, NULL);
     context->references++;
     context->output_type = CCW_OUTPUT_MEMORY;
-    context->seed = (unsigned) time (NULL);
 
     return context;
 }
@@ -396,45 +397,85 @@ ccw_int ccw_compile_string (ccw_context context,
                             const ccw_char *string_value,
                             ccw_uint string_size)
 {
-    ccw_char temp_source[24] = {0};
-    ccw_char temp_module[25] = {0};
     ccw_char exec_cmd[1031] = {0};
-    FILE  *h;
-    ccw_uint random_number;
-    lt_dladvise advise;
+    ccw_char *temp_dir_t = NULL;
+    ccw_char *temp_dir = NULL;
+    ccw_char *temp_source_t = NULL;
+    ccw_char *temp_source = NULL;
+    ccw_char *temp_module_t = NULL;
+    ccw_char *temp_module = NULL;
+    int src_fd = -1;
+    int mod_fd = -1;
+    lt_dladvise advise = NULL;
+    ccw_int ret_val = CCW_INVALID_VALUE;
 
-    if (NULL == context) {    
-        return CCW_INVALID_CONTEXT;
+    if (NULL == context) {
+        ret_val = CCW_INVALID_CONTEXT;
+        goto cleanup;
     }
 
     if (NULL == string_value) {
-        return CCW_INVALID_VALUE;
+        ret_val = CCW_INVALID_VALUE;
+        goto cleanup;
     }
 
     if (0 == string_size) {
         string_size = strlen (string_value);
     }
 
-    /* set up temporary file names */
-    pthread_mutex_lock (&context->mutex);
-    random_number = rand_r(&context->seed) % 10000;
-    pthread_mutex_unlock (&context->mutex);
-    snprintf (temp_source, 24, "/tmp/ccw-source-%05d.c", random_number);
-    snprintf (temp_module, 25, "/tmp/ccw-module-%05d.so", random_number);
-
-
-    /* create temporary source file containing string_value */
-    if (NULL == (h = fopen (temp_source, "w"))) {
-        return CCW_OUT_OF_MEMORY;
+    /* set up temporary paths */
+    if (NULL == (temp_dir_t       = calloc (24, sizeof(ccw_char)))
+        || NULL == (temp_source_t = calloc (24+18, sizeof(ccw_char)))
+        || NULL == (temp_source   = calloc (24+20, sizeof(ccw_char)))
+        || NULL == (temp_module_t = calloc (24+18, sizeof(ccw_char)))
+        || NULL == (temp_module   = calloc (24+21, sizeof(ccw_char))))
+    {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
     }
 
-    if (string_size != fwrite (string_value, sizeof(ccw_char), string_size, h)) {
-        return CCW_OUT_OF_MEMORY;
+    /* create temp dir */
+    snprintf (temp_dir_t,   24, "/tmp/ccw-tmp-dir-XXXXXX");
+    if (NULL == (temp_dir = mkdtemp (temp_dir_t))) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
     }
 
-    if (EOF == fflush (h)) {
-        return CCW_OUT_OF_MEMORY;
+    /* create tmp source file */
+    snprintf (temp_source_t, 24+18, "%s/ccw-source-XXXXXX", temp_dir);
+    fprintf (stderr, "mkstemp (%s)\n", temp_source_t);
+    if (-1 == (src_fd = mkstemp (temp_source_t))) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
     }
+    snprintf (temp_source, 24+20, "%s.c", temp_source_t);
+    if (0 != rename (temp_source_t, temp_source)) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+
+    /* create temp module file */
+    snprintf (temp_module_t, 24+18, "%s/ccw-module-XXXXXX", temp_dir);
+    fprintf (stderr, "mkstemp (%s)\n", temp_module_t);
+    if (-1 == (mod_fd = mkstemp (temp_module_t))) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+    snprintf (temp_module, 24+21, "%s.so", temp_module_t);
+    if (0 != rename (temp_module_t, temp_module)) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+
+    /* write source string to temp source file */
+    if (string_size != write (src_fd, string_value, sizeof(ccw_char)*string_size)) {
+        ret_val = CCW_OUT_OF_MEMORY;
+        goto cleanup;
+    }
+
+    /* close the source file to make sure data gets written out */
+    close (src_fd);
+    src_fd = -1;
 
     /* construct compile line */
     snprintf (exec_cmd, 1031,
@@ -448,7 +489,8 @@ ccw_int ccw_compile_string (ccw_context context,
 
     /* do the compilation */
     if (0 != system (exec_cmd)) {
-        return CCW_COMPILE_ERROR;
+        ret_val = CCW_COMPILE_ERROR;
+        goto cleanup;
     }
 
     /* dlopen the compiled so */
@@ -456,21 +498,56 @@ ccw_int ccw_compile_string (ccw_context context,
         || lt_dladvise_ext (&advise)
         || lt_dladvise_local (&advise))
     {
-        return CCW_LINK_ERROR;
+        ret_val = CCW_LINK_ERROR;
+        goto cleanup;
     }
 
     /* store the dl handle for later calls to get_symbol */
+    close (mod_fd);
+    mod_fd = -1;
     if (0 != ccw_add_dl (context, lt_dlopenadvise (temp_module, advise))) {
-        return CCW_LINK_ERROR;
+        ret_val = CCW_LINK_ERROR;
+        goto cleanup;
     }
 
-    /* clean up resources */
-    lt_dladvise_destroy (&advise);
-    unlink (temp_source);
-    unlink (temp_module);
-    fclose (h);
+    ret_val = CCW_SUCCESS;
 
-    return CCW_SUCCESS;
+    /* clean up resources */
+cleanup:
+    if (-1 != src_fd) close (src_fd);
+    if (-1 != mod_fd) close (mod_fd);
+
+    if (temp_source) {
+        if (temp_source[0]) unlink (temp_source);
+        else if (temp_source_t[0]) unlink (temp_source_t);
+
+        free (temp_source);
+        free (temp_source_t);
+    } else if (temp_source_t) {
+        free (temp_source_t);
+    }
+
+    if (temp_module) {
+        if (temp_module[0]) unlink (temp_module);
+        else if (temp_module_t[0]) unlink (temp_module_t);
+
+        free (temp_module);
+        free (temp_module_t);
+
+        temp_module_t = NULL;
+    } else if (temp_module_t) {
+        free (temp_module_t);
+    }
+
+    if (temp_dir) {
+        if (temp_dir[0]) rmdir (temp_dir);
+        free (temp_dir);
+    } else if (temp_dir_t) {
+        free (temp_dir_t);
+    }
+
+    if (NULL != advise) lt_dladvise_destroy (&advise);
+    return ret_val;
 }
 
 /* search through all opened dl's and return a function pointer if
